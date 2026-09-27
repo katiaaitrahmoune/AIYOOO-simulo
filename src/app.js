@@ -6,6 +6,7 @@ import dotenv from "dotenv"
 import rateLimit from "express-rate-limit"
 import authRoutes from "./routes/auth.routes.js"
 import signupRoutes from "./routes/signup.routes.js"
+import simulationRoutes from "./routes/simulation.routes";
 
 dotenv.config()
 
@@ -20,7 +21,7 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }))
 app.use(express.json())
 app.use(cookieParser())
 
-
+app.use("/api", simulationRoutes);
 app.use("/api/auth", authRoutes)
 app.use("/api/signup", signupRoutes)
 
