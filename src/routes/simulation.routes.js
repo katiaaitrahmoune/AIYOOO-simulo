@@ -1,10 +1,10 @@
 // src/routes/simulation.routes.js
-const { Router } = require("express");
-const { handleSimulationQuery } = require("../controllers/simulation.controller");
+import { Router } from "express";
+import { handleSimulationQuery } from "../controllers/simulation.controller.js";
 
 const router = Router();
 
 // POST /api/simulate  { "question": "What if Supplier X is delayed 2 weeks?" }
 router.post("/simulate", handleSimulationQuery);
 
-module.exports = router;
+export default router;

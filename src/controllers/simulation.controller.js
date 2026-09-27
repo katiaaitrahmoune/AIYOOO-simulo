@@ -1,7 +1,7 @@
 // src/controllers/simulation.controller.js
-const { runSimulationAgent } = require("../services/geminiAgent.service");
+import { runSimulationAgent } from "../services/geminiAgent.service.js";
 
-async function handleSimulationQuery(req, res) {
+export async function handleSimulationQuery(req, res) {
   try {
     const { question } = req.body;
     if (!question || typeof question !== "string") {
@@ -15,5 +15,3 @@ async function handleSimulationQuery(req, res) {
     return res.status(500).json({ error: err.message ?? "Internal error" });
   }
 }
-
-module.exports = { handleSimulationQuery };

@@ -7,7 +7,7 @@ function addDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
-function simulateForward(state, horizonDays) {
+export function simulateForward(state, horizonDays) {
   const dailyProjection = [];
   const stockoutEvents = [];
   const stockoutDayBySku = new Map();
@@ -80,5 +80,3 @@ function simulateForward(state, horizonDays) {
     missed_fulfillments: missedFulfillments,
   };
 }
-
-module.exports = { simulateForward };

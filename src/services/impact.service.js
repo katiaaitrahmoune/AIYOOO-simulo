@@ -1,7 +1,7 @@
 // src/services/impact.service.js
 // Tool 5: compute_impact — diffs two SimulationResults (baseline vs. scenario)
 
-function computeImpact(before, after) {
+export function computeImpact(before, after) {
   const beforeStockoutBySku = new Map(before.stockout_events.map((e) => [e.sku, e.stockout_day]));
   const afterStockoutBySku = new Map(after.stockout_events.map((e) => [e.sku, e.stockout_day]));
 
@@ -35,5 +35,3 @@ function computeImpact(before, after) {
     newly_missed_fulfillments: newlyMissedFulfillments,
   };
 }
-
-module.exports = { computeImpact };

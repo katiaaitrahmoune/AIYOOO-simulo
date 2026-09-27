@@ -6,7 +6,7 @@ function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
 }
 
-function applyScenario(state, scenario) {
+export function applyScenario(state, scenario) {
   const next = cloneState(state);
 
   switch (scenario.scenario_type) {
@@ -65,5 +65,3 @@ function applyScenario(state, scenario) {
 
   return next;
 }
-
-module.exports = { applyScenario };
