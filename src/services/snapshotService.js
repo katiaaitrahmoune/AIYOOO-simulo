@@ -1,5 +1,6 @@
 // src/services/snapshotService.js
-import snapshotModel from '../models/snapshotModel.js';
+
+import snapshotModel from "../models/snapshotModel.js";
 
 function mapItem(r) {
   return {
@@ -7,7 +8,8 @@ function mapItem(r) {
     sku: r.sku,
     name: r.name,
     quantity_on_hand: Number(r.quantity_on_hand),
-    reorder_point: r.reorder_point !== null ? Number(r.reorder_point) : null,
+    reorder_point:
+      r.reorder_point !== null ? Number(r.reorder_point) : null,
     incoming_qty: Number(r.incoming_qty),
     pending_demand: Number(r.pending_demand),
     avg_daily_demand: Number(r.avg_daily_demand),
@@ -50,49 +52,88 @@ function mapSupplier(r) {
   };
 }
 
-async function getItemsSnapshot(enterpriseId) {
-  const rows = await snapshotModel.findItemsByEnterprise(enterpriseId);
+/*
+ * The hackathon uses one shared mock ERP dataset.
+ * We therefore automatically select the most recently
+ * created enterprise instead of requiring enterpriseId
+ * from the user/API request.
+ */
+async function getEnterpriseId() {
+  const enterpriseId = await snapshotModel.findMostRecentEnterpriseId();
+
+  if (!enterpriseId) {
+    throw new Error("No enterprise data found in the ERP database");
+  }
+
+  return enterpriseId;
+}
+
+async function getItemsSnapshot() {
+  const enterpriseId = await getEnterpriseId();
+
+  const rows =
+    await snapshotModel.findItemsByEnterprise(enterpriseId);
+
   return rows.map(mapItem);
 }
 
-async function getOpenPurchaseOrders(enterpriseId) {
+async function getOpenPurchaseOrders() {
+  const enterpriseId = await getEnterpriseId();
+
   const rows =
     await snapshotModel.findOpenPurchaseOrdersByEnterprise(enterpriseId);
 
   return rows.map(mapPurchaseOrder);
 }
 
-async function getOpenSalesOrders(enterpriseId) {
+async function getOpenSalesOrders() {
+  const enterpriseId = await getEnterpriseId();
+
   const rows =
     await snapshotModel.findOpenSalesOrdersByEnterprise(enterpriseId);
 
   return rows.map(mapSalesOrder);
 }
 
-async function getSuppliers(enterpriseId) {
-  const rows = await snapshotModel.findSuppliersByEnterprise(enterpriseId);
+async function getSuppliers() {
+  const enterpriseId = await getEnterpriseId();
+
+  const rows =
+    await snapshotModel.findSuppliersByEnterprise(enterpriseId);
+
   return rows.map(mapSupplier);
 }
 
-async function buildSnapshot(enterpriseId) {
-  const [items, openPurchaseOrders, openSalesOrders, suppliers] =
-    await Promise.all([
-      getItemsSnapshot(enterpriseId),
-      getOpenPurchaseOrders(enterpriseId),
-      getOpenSalesOrders(enterpriseId),
-      getSuppliers(enterpriseId),
-    ]);
+async function buildSnapshot() {
+  const enterpriseId = await getEnterpriseId();
+
+  const [
+    items,
+    openPurchaseOrders,
+    openSalesOrders,
+    suppliers,
+  ] = await Promise.all([
+    snapshotModel.findItemsByEnterprise(enterpriseId),
+    snapshotModel.findOpenPurchaseOrdersByEnterprise(enterpriseId),
+    snapshotModel.findOpenSalesOrdersByEnterprise(enterpriseId),
+    snapshotModel.findSuppliersByEnterprise(enterpriseId),
+  ]);
 
   return {
     snapshot_timestamp: new Date().toISOString(),
-    items,
-    open_purchase_orders: openPurchaseOrders,
-    open_sales_orders: openSalesOrders,
-    suppliers,
+
+    items: items.map(mapItem),
+
+    open_purchase_orders:
+      openPurchaseOrders.map(mapPurchaseOrder),
+
+    open_sales_orders:
+      openSalesOrders.map(mapSalesOrder),
+
+    suppliers: suppliers.map(mapSupplier),
   };
 }
 
-// Named exports
 export {
   buildSnapshot,
   getItemsSnapshot,
@@ -101,7 +142,6 @@ export {
   getSuppliers,
 };
 
-// Default export
 export default {
   buildSnapshot,
   getItemsSnapshot,

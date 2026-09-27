@@ -1,139 +1,261 @@
 // src/services/geminiAgent.service.js
-// Layer 2: AI Simulation Agent
-//
-// Gemini decides which tool to call.
-// The actual ERP data comes from Layer 1: snapshotService.js
-// Simulation/scenario/impact logic remains deterministic.
 
-import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import {
+  GoogleGenerativeAI,
+  SchemaType,
+} from "@google/generative-ai";
+
 import dotenv from "dotenv";
 
 dotenv.config();
 
 import {
   buildSnapshot,
-  getItemsSnapshot,
-  getOpenPurchaseOrders,
-  getOpenSalesOrders,
-  getSuppliers,
 } from "./snapshotService.js";
 
-import { applyScenario } from "./scenario.service.js";
-import { simulateForward } from "./simulationEngine.service.js";
-import { computeImpact } from "./impact.service.js";
+import {
+  applyScenario,
+} from "./scenario.service.js";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+import {
+  simulateForward,
+} from "./simulationEngine.service.js";
+
+import {
+  computeImpact,
+} from "./impact.service.js";
 
 // ============================================================
-// 1. Helper functions using the REAL ERP snapshot
+// GEMINI
 // ============================================================
 
-async function getTwinState(enterpriseId) {
-  return await buildSnapshot(enterpriseId);
-}
-
-async function getTwinSummary(enterpriseId) {
-  const snapshot = await buildSnapshot(enterpriseId);
-
-  const itemsAtOrBelowReorderPoint = snapshot.items.filter(
-    (item) =>
-      item.reorder_point !== null &&
-      item.quantity_on_hand <= item.reorder_point
+const genAI =
+  new GoogleGenerativeAI(
+    process.env.GEMINI_API_KEY
   );
 
-  return {
-    snapshot_timestamp: snapshot.snapshot_timestamp,
+// ============================================================
+// TWIN SUMMARY
+// ============================================================
 
-    total_items: snapshot.items.length,
+function createTwinSummary(twinState) {
+  const items =
+    twinState.items ?? [];
+
+  const atRiskItems =
+    items.filter((item) => {
+      if (item.reorder_point === null) {
+        return false;
+      }
+
+      return (
+        item.quantity_on_hand <=
+        item.reorder_point
+      );
+    });
+
+  return {
+    snapshot_timestamp:
+      twinState.snapshot_timestamp,
+
+    total_items:
+      items.length,
 
     items_at_or_below_reorder_point:
-      itemsAtOrBelowReorderPoint.length,
+      atRiskItems.length,
 
-    open_purchase_orders: snapshot.open_purchase_orders.length,
+    at_risk_items:
+      atRiskItems.map((item) => ({
+        sku: item.sku,
+        name: item.name,
+        quantity_on_hand:
+          item.quantity_on_hand,
+        reorder_point:
+          item.reorder_point,
+        incoming_qty:
+          item.incoming_qty,
+        pending_demand:
+          item.pending_demand,
+        avg_daily_demand:
+          item.avg_daily_demand,
+      })),
 
-    open_sales_orders: snapshot.open_sales_orders.length,
+    open_purchase_orders:
+      (
+        twinState.open_purchase_orders ?? []
+      ).length,
 
-    suppliers: snapshot.suppliers.length,
+    open_sales_orders:
+      (
+        twinState.open_sales_orders ?? []
+      ).length,
 
-    low_stock_items: itemsAtOrBelowReorderPoint.map((item) => ({
-      sku: item.sku,
-      name: item.name,
-      quantity_on_hand: item.quantity_on_hand,
-      reorder_point: item.reorder_point,
-    })),
+    suppliers:
+      (
+        twinState.suppliers ?? []
+      ).length,
   };
 }
 
-async function getItemDetail(enterpriseId, sku) {
-  const snapshot = await buildSnapshot(enterpriseId);
+// ============================================================
+// TOOL: GET ITEM STATE
+// ============================================================
 
-  const item = snapshot.items.find(
-    (item) => item.sku.toLowerCase() === sku.toLowerCase()
-  );
+function getItemState(
+  twinState,
+  sku
+) {
+  if (!sku) {
+    return {
+      found: false,
+      error: "SKU is required.",
+    };
+  }
+
+  const item =
+    (twinState.items ?? []).find(
+      (item) =>
+        String(item.sku).toLowerCase() ===
+        String(sku).toLowerCase()
+    );
 
   if (!item) {
     return {
       found: false,
       sku,
-      message: `No item with SKU "${sku}" was found in the ERP snapshot.`,
+      message:
+        `No item with SKU "${sku}" was found.`,
     };
   }
 
-  const relatedPurchaseOrders = snapshot.open_purchase_orders.filter(
-    (po) => po.item_sku.toLowerCase() === sku.toLowerCase()
-  );
+  const purchaseOrders =
+    (
+      twinState.open_purchase_orders ?? []
+    ).filter(
+      (po) =>
+        String(po.item_sku).toLowerCase() ===
+        String(sku).toLowerCase()
+    );
 
-  const relatedSalesOrders = snapshot.open_sales_orders.filter(
-    (so) => so.item_sku.toLowerCase() === sku.toLowerCase()
-  );
+  const salesOrders =
+    (
+      twinState.open_sales_orders ?? []
+    ).filter(
+      (so) =>
+        String(so.item_sku).toLowerCase() ===
+        String(sku).toLowerCase()
+    );
 
   return {
     found: true,
 
     item,
 
-    open_purchase_orders: relatedPurchaseOrders,
+    open_purchase_orders:
+      purchaseOrders,
 
-    open_sales_orders: relatedSalesOrders,
-
-    total_incoming_qty: relatedPurchaseOrders.reduce(
-      (sum, po) => sum + po.qty_ordered - po.qty_received,
-      0
-    ),
-
-    total_pending_demand: relatedSalesOrders.reduce(
-      (sum, so) => sum + so.qty_ordered - so.qty_fulfilled,
-      0
-    ),
+    open_sales_orders:
+      salesOrders,
   };
 }
 
 // ============================================================
-// 2. Tool schemas Gemini will see
+// TOOL: GET SUPPLIER STATE
+// ============================================================
+
+function getSupplierState(
+  twinState,
+  vendorId
+) {
+  if (!vendorId) {
+    return {
+      found: false,
+      error:
+        "vendor_id is required.",
+    };
+  }
+
+  const supplier =
+    (
+      twinState.suppliers ?? []
+    ).find(
+      (supplier) =>
+        String(
+          supplier.vendor_id
+        ).toLowerCase() ===
+        String(
+          vendorId
+        ).toLowerCase()
+    );
+
+  if (!supplier) {
+    return {
+      found: false,
+      vendor_id: vendorId,
+      message:
+        `No supplier with vendor ID "${vendorId}" was found.`,
+    };
+  }
+
+  const purchaseOrders =
+    (
+      twinState.open_purchase_orders ?? []
+    ).filter(
+      (po) =>
+        String(
+          po.vendor_id
+        ).toLowerCase() ===
+        String(
+          vendorId
+        ).toLowerCase()
+    );
+
+  return {
+    found: true,
+
+    supplier,
+
+    open_purchase_orders:
+      purchaseOrders,
+  };
+}
+
+// ============================================================
+// GEMINI TOOL DEFINITIONS
 // ============================================================
 
 const toolDeclarations = [
+
+  // ----------------------------------------------------------
+  // TWIN SUMMARY
+  // ----------------------------------------------------------
+
   {
     name: "get_twin_summary",
 
     description:
-      "Returns a compact summary of the current ERP digital twin state. " +
-      "Use this when the user asks about the overall inventory situation, " +
-      "low-stock items, open purchase orders, open sales orders, or suppliers.",
+      "Returns a compact summary of the current ERP digital twin, " +
+      "including item count, low-stock items, open purchase orders, " +
+      "open sales orders, and supplier count.",
 
     parameters: {
       type: SchemaType.OBJECT,
+
       properties: {},
     },
   },
 
+  // ----------------------------------------------------------
+  // ITEM STATE
+  // ----------------------------------------------------------
+
   {
-    name: "get_item_detail",
+    name: "get_item_state",
 
     description:
-      "Returns detailed ERP information for a single item by SKU, including " +
-      "stock on hand, reorder point, incoming quantity, pending demand, " +
-      "average daily demand, and related open purchase/sales orders.",
+      "Returns the current ERP state of a specific item by SKU, " +
+      "including stock, reorder point, incoming quantity, pending " +
+      "demand, average daily demand, and related orders.",
 
     parameters: {
       type: SchemaType.OBJECT,
@@ -141,7 +263,9 @@ const toolDeclarations = [
       properties: {
         sku: {
           type: SchemaType.STRING,
-          description: "The item SKU to look up.",
+
+          description:
+            "SKU of the item.",
         },
       },
 
@@ -149,18 +273,51 @@ const toolDeclarations = [
     },
   },
 
+  // ----------------------------------------------------------
+  // SUPPLIER STATE
+  // ----------------------------------------------------------
+
   {
-    name: "run_scenario_simulation",
+    name: "get_supplier_state",
 
     description:
-      "Runs a hypothetical what-if scenario against the current ERP digital twin. " +
-      "The scenario is compared against a baseline simulation with no changes. " +
-      "Use this for supplier delays, demand spikes, stock adjustments, or lead-time changes.",
+      "Returns supplier information including average lead time, " +
+      "reliability score, and open purchase orders.",
 
     parameters: {
       type: SchemaType.OBJECT,
 
       properties: {
+        vendor_id: {
+          type: SchemaType.STRING,
+
+          description:
+            "Supplier/vendor ID.",
+        },
+      },
+
+      required: ["vendor_id"],
+    },
+  },
+
+  // ----------------------------------------------------------
+  // SIMULATION
+  // ----------------------------------------------------------
+
+  {
+    name: "run_scenario_simulation",
+
+    description:
+      "Runs a deterministic what-if simulation. It applies a " +
+      "hypothetical scenario to the current ERP digital twin, " +
+      "simulates both the normal baseline and the hypothetical " +
+      "scenario, and compares their impact.",
+
+    parameters: {
+      type: SchemaType.OBJECT,
+
+      properties: {
+
         scenario_type: {
           type: SchemaType.STRING,
 
@@ -170,153 +327,187 @@ const toolDeclarations = [
             "stock_adjustment",
             "lead_time_change",
           ],
-
-          description: "The type of hypothetical scenario.",
         },
 
         vendor_id: {
           type: SchemaType.STRING,
-          description:
-            "Supplier/vendor ID. Required when the scenario concerns a supplier.",
         },
 
         sku: {
           type: SchemaType.STRING,
-          description:
-            "Item SKU. Required when the scenario concerns a specific item.",
         },
 
         delay_days: {
           type: SchemaType.NUMBER,
-          description:
-            "Number of days a supplier delivery is delayed.",
         },
 
         demand_multiplier: {
           type: SchemaType.NUMBER,
-          description:
-            "Multiplier applied to demand. For example, 1.5 means demand increases by 50%.",
         },
 
         stock_delta: {
           type: SchemaType.NUMBER,
-          description:
-            "Change in stock quantity. Positive increases stock, negative decreases stock.",
         },
 
         horizon_days: {
           type: SchemaType.NUMBER,
+
           description:
-            "Number of days forward to simulate. Defaults to 30.",
+            "Simulation horizon in days. Defaults to 30.",
         },
       },
 
-      required: ["scenario_type"],
+      required: [
+        "scenario_type",
+      ],
     },
   },
 ];
 
 // ============================================================
-// 3. Tool dispatcher
+// TOOL EXECUTOR
 // ============================================================
 
-async function executeTool(enterpriseId, name, args) {
-  switch (name) {
+async function executeTool(
+  toolName,
+  args,
+  twinState
+) {
+
+  switch (toolName) {
+
     // --------------------------------------------------------
-    // Current ERP / Digital Twin summary
+    // SUMMARY
     // --------------------------------------------------------
 
     case "get_twin_summary":
-      return await getTwinSummary(enterpriseId);
+
+      return createTwinSummary(
+        twinState
+      );
 
     // --------------------------------------------------------
-    // Specific item information
+    // ITEM
     // --------------------------------------------------------
 
-    case "get_item_detail":
-      return await getItemDetail(enterpriseId, args.sku);
+    case "get_item_state":
+
+      return getItemState(
+        twinState,
+        args.sku
+      );
 
     // --------------------------------------------------------
-    // What-if simulation
+    // SUPPLIER
+    // --------------------------------------------------------
+
+    case "get_supplier_state":
+
+      return getSupplierState(
+        twinState,
+        args.vendor_id
+      );
+
+    // --------------------------------------------------------
+    // SIMULATION
     // --------------------------------------------------------
 
     case "run_scenario_simulation": {
-      // Get the REAL current ERP state from Layer 1
-      const baseState = await getTwinState(enterpriseId);
 
-      const horizon = args.horizon_days ?? 30;
+      const horizon =
+        args.horizon_days ?? 30;
 
-      // Build the hypothetical scenario
       const scenario = {
-        scenario_type: args.scenario_type,
+        scenario_type:
+          args.scenario_type,
 
-        vendor_id: args.vendor_id ?? null,
+        vendor_id:
+          args.vendor_id ?? null,
 
-        sku: args.sku ?? null,
+        sku:
+          args.sku ?? null,
 
-        delay_days: args.delay_days ?? null,
+        delay_days:
+          args.delay_days ?? null,
 
-        demand_multiplier: args.demand_multiplier ?? null,
+        demand_multiplier:
+          args.demand_multiplier ?? null,
 
-        stock_delta: args.stock_delta ?? null,
+        stock_delta:
+          args.stock_delta ?? null,
       };
 
-      // Apply the hypothetical change to the ERP twin
-      const scenarioState = applyScenario(baseState, scenario);
+      // Apply hypothetical scenario
+      const scenarioState =
+        applyScenario(
+          twinState,
+          scenario
+        );
 
-      // Simulate the normal situation
-      const baselineResult = simulateForward(
-        baseState,
-        horizon
-      );
+      // Normal world
+      const baselineResult =
+        simulateForward(
+          twinState,
+          horizon
+        );
 
-      // Simulate the hypothetical situation
-      const scenarioResult = simulateForward(
-        scenarioState,
-        horizon
-      );
+      // Hypothetical world
+      const scenarioResult =
+        simulateForward(
+          scenarioState,
+          horizon
+        );
 
-      // Compare the two simulations
-      const impact = computeImpact(
-        baselineResult,
-        scenarioResult
-      );
+      // Difference
+      const impact =
+        computeImpact(
+          baselineResult,
+          scenarioResult
+        );
 
       return {
         scenario,
 
-        horizon_days: horizon,
+        horizon_days:
+          horizon,
 
-        baseline: baselineResult,
+        baseline:
+          baselineResult,
 
-        scenario_result: scenarioResult,
+        scenario_result:
+          scenarioResult,
 
         impact,
       };
     }
 
     default:
-      throw new Error(`Unknown tool: ${name}`);
+
+      throw new Error(
+        `Unknown tool: ${toolName}`
+      );
   }
 }
 
 // ============================================================
-// 4. Gemini AI Agent
+// MAIN AI SIMULATION AGENT
 // ============================================================
 
 export async function runSimulationAgent(
-  enterpriseId,
   userQuestion
 ) {
-  if (!enterpriseId) {
-    throw new Error(
-      "enterpriseId is required to run the ERP simulation agent."
-    );
-  }
 
-  if (!userQuestion || !userQuestion.trim()) {
+  // ----------------------------------------------------------
+  // Validate
+  // ----------------------------------------------------------
+
+  if (
+    !userQuestion ||
+    typeof userQuestion !== "string" ||
+    !userQuestion.trim()
+  ) {
     throw new Error(
-      "userQuestion is required."
+      "A user question is required."
     );
   }
 
@@ -326,107 +517,194 @@ export async function runSimulationAgent(
     );
   }
 
-  const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
+  // ----------------------------------------------------------
+  // STEP 1
+  // ERP → DIGITAL TWIN
+  // ----------------------------------------------------------
 
-    tools: [
-      {
-        functionDeclarations: toolDeclarations,
-      },
-    ],
+  const twinState =
+    await buildSnapshot();
 
-    systemInstruction: `
-You are an ERP simulation agent.
+  // ----------------------------------------------------------
+  // STEP 2
+  // Compact information for Gemini
+  // ----------------------------------------------------------
 
-You answer questions about a company's inventory and supply-chain
-operations using the company's ERP digital twin.
+  const twinSummary =
+    createTwinSummary(
+      twinState
+    );
 
-IMPORTANT RULES:
+  // ----------------------------------------------------------
+  // STEP 3
+  // Gemini
+  // ----------------------------------------------------------
+
+  const model =
+    genAI.getGenerativeModel({
+
+      model:
+        "gemini-2.5-flash",
+
+      tools: [
+        {
+          functionDeclarations:
+            toolDeclarations,
+        },
+      ],
+
+      systemInstruction: `
+You are an AI Simulation Agent for an ERP digital twin.
+
+You answer operational questions and "what-if" questions
+using the company's current ERP data.
+
+The ERP data has already been loaded into a digital twin.
+
+RULES:
 
 1. Never invent ERP numbers.
 
-2. When the user asks about current ERP data, use the appropriate
-   tool to retrieve the real data.
+2. Use the provided summary for general information.
 
-3. When the user asks a "what-if" question, use
-   run_scenario_simulation.
+3. Use get_item_state when detailed item information
+   is required.
 
-4. The simulation tools use deterministic calculations.
-   Do not perform the simulation yourself.
+4. Use get_supplier_state when detailed supplier
+   information is required.
 
-5. Clearly distinguish:
-   - Current ERP facts
-   - Hypothetical scenario assumptions
-   - Simulation results
+5. Use run_scenario_simulation for hypothetical
+   what-if questions.
 
-6. After receiving tool results, explain the result in plain,
-   concise language suitable for a manager.
+6. Never perform the simulation calculations yourself.
+   The deterministic backend tools perform them.
 
-7. If the user's question does not contain enough information
-   to construct a scenario, ask for the missing information.
+7. You may call multiple tools.
 
-8. Do not invent SKU numbers, supplier IDs, quantities,
-   dates, or simulation results.
+8. You may use the result of one tool to decide
+   which tool to call next.
 
-9. When discussing an item, use its SKU and name when available.
+9. Clearly distinguish:
+   - current ERP facts
+   - hypothetical assumptions
+   - simulation results
 
-10. When discussing a scenario, explain both:
+10. The final answer should be understandable to
+    a business manager.
+
+11. Explain:
+    - what happens
+    - why it happens
     - what changes compared with the baseline
-    - why the change matters operationally
+    - which items/orders/suppliers are affected
 
-The current enterprise ID is:
+12. Never invent SKUs, supplier IDs, quantities,
+    dates, or simulation results.
 
-${enterpriseId}
+13. If required information is missing, ask for it.
+
+The current ERP twin summary is supplied in the
+user message.
 `,
-  });
+    });
 
-  const chat = model.startChat();
+  // ----------------------------------------------------------
+  // STEP 4
+  // Start conversation
+  // ----------------------------------------------------------
 
-  let result = await chat.sendMessage(userQuestion);
+  const chat =
+    model.startChat();
 
-  // ==========================================================
-  // 5. Agent loop
-  //
-  // Gemini can request one or more tools.
-  // We execute the requested deterministic function and
-  // send the result back to Gemini.
-  // ==========================================================
+  // ----------------------------------------------------------
+  // STEP 5
+  // Send question + summary
+  // ----------------------------------------------------------
+
+  const initialPrompt = `
+CURRENT ERP DIGITAL TWIN SUMMARY:
+
+${JSON.stringify(
+  twinSummary,
+  null,
+  2
+)}
+
+USER QUESTION:
+
+${userQuestion}
+
+Use the available tools when more detailed ERP
+information or simulation is required.
+`;
+
+  let result =
+    await chat.sendMessage(
+      initialPrompt
+    );
+
+  // ----------------------------------------------------------
+  // STEP 6
+  // TOOL LOOP
+  // ----------------------------------------------------------
 
   while (true) {
+
     const functionCalls =
       result.response.functionCalls();
 
-    if (!functionCalls || functionCalls.length === 0) {
+    if (
+      !functionCalls ||
+      functionCalls.length === 0
+    ) {
       break;
     }
 
     const functionResponses = [];
 
-    for (const call of functionCalls) {
-      const toolResult = await executeTool(
-        enterpriseId,
-        call.name,
-        call.args ?? {}
+    for (
+      const call of functionCalls
+    ) {
+
+      console.log(
+        `Gemini requested tool: ${call.name}`,
+        call.args
       );
+
+      const toolResult =
+        await executeTool(
+          call.name,
+          call.args ?? {},
+          twinState
+        );
 
       functionResponses.push({
         functionResponse: {
-          name: call.name,
-          response: toolResult,
+          name:
+            call.name,
+
+          response:
+            toolResult,
         },
       });
     }
 
-    result = await chat.sendMessage(
-      functionResponses
-    );
+    result =
+      await chat.sendMessage(
+        functionResponses
+      );
   }
+
+  // ----------------------------------------------------------
+  // STEP 7
+  // FINAL ANSWER
+  // ----------------------------------------------------------
 
   return result.response.text();
 }
 
 // ============================================================
-// Default export
+// DEFAULT EXPORT
 // ============================================================
 
 export default {
