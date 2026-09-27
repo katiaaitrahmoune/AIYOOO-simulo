@@ -6,7 +6,6 @@ import dotenv from "dotenv"
 import rateLimit from "express-rate-limit"
 import authRoutes from "./routes/auth.routes.js"
 import signupRoutes from "./routes/signup.routes.js"
-import simulationRoutes from "./routes/simulation.routes";
 
 dotenv.config()
 
