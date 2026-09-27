@@ -1,4 +1,3 @@
-
 import express from "express"
 import cors from "cors"
 import helmet from "helmet"
@@ -6,6 +5,7 @@ import cookieParser from "cookie-parser"
 import dotenv from "dotenv"
 import rateLimit from "express-rate-limit"
 import authRoutes from "./routes/auth.routes.js"
+import signupRoutes from "./routes/signup.routes.js"
 
 dotenv.config()
 
@@ -22,6 +22,7 @@ app.use(cookieParser())
 
 
 app.use("/api/auth", authRoutes)
+app.use("/api/signup", signupRoutes)
 
 
 app.get("/api/health", (req, res) => {
